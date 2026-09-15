@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
+  type CallToolRequest,
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -15,7 +16,9 @@ import { formatTickTickError, isTickTickError } from './common/errors.js';
 import { VERSION } from './common/version.js';
 import z from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import console from 'console';
+import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
 import { main } from './cli.js';
 
 // If fetch doesn't exist in global scope, add it
@@ -23,19 +26,7 @@ if (!globalThis.fetch) {
   globalThis.fetch = fetch as unknown as typeof global.fetch;
 }
 
-const server = new Server(
-  {
-    name: 'ticktick-mcp-server',
-    version: VERSION,
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
+const listTools = async () => {
   return {
     tools: [
       {
@@ -126,9 +117,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
     ],
   };
-});
+};
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+const callTool = async (request: CallToolRequest) => {
   try {
     const toolsWithoutArguments = ['get_user_projects', 'get_current_user'];
 
@@ -336,7 +327,89 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     throw error;
   }
-});
+};
+
+function createTickTickServer() {
+  const server = new Server(
+    {
+      name: 'ticktick-mcp-server',
+      version: VERSION,
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
+  server.setRequestHandler(ListToolsRequestSchema, listTools);
+  server.setRequestHandler(CallToolRequestSchema, callTool);
+  return server;
+}
+
+function requestHost(request: IncomingMessage): string | undefined {
+  const value = request.headers.host;
+  if (!value) return undefined;
+  if (value.startsWith('[')) return value.slice(0, value.indexOf(']') + 1);
+  return value.split(':', 1)[0];
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+}
+
+async function runHttpServer(host: string, port: number) {
+  if (!isLoopbackHost(host)) {
+    throw new Error(`HTTP transport must bind to a loopback host, got ${host}`);
+  }
+
+  const app = createHttpServer(async (request, response) => {
+    const hostHeader = requestHost(request);
+    if (!hostHeader || !isLoopbackHost(hostHeader)) {
+      response.writeHead(421).end('Misdirected Request');
+      return;
+    }
+
+    const pathname = new URL(request.url ?? '/', `http://${hostHeader}`).pathname;
+    if (pathname !== '/mcp') {
+      response.writeHead(404).end('Not Found');
+      return;
+    }
+    if (request.method !== 'POST') {
+      response.writeHead(405, { Allow: 'POST' }).end('Method Not Allowed');
+      return;
+    }
+
+    const server = createTickTickServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    response.on('close', () => {
+      void transport.close();
+      void server.close();
+    });
+
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(request, response);
+    } catch (error) {
+      console.error('HTTP request failed:', error);
+      if (!response.headersSent) {
+        response.writeHead(500, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' },
+          id: null,
+        }));
+      }
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    app.once('error', reject);
+    app.listen(port, host, () => resolve());
+  });
+  console.error(`TickTick MCP Server running on http://${host}:${port}/mcp`);
+}
 
 async function runServer() {
   const initialized = await main();
@@ -347,9 +420,24 @@ async function runServer() {
 
   dotenv.config();
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error('TickTick MCP Server running on stdio');
+  const transportName = process.env.MCP_TRANSPORT ?? 'stdio';
+  if (transportName === 'stdio') {
+    const server = createTickTickServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error('TickTick MCP Server running on stdio');
+    return;
+  }
+  if (transportName === 'http') {
+    const host = process.env.MCP_HOST ?? '127.0.0.1';
+    const port = Number.parseInt(process.env.MCP_PORT ?? '8001', 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`Invalid MCP_PORT: ${process.env.MCP_PORT ?? ''}`);
+    }
+    await runHttpServer(host, port);
+    return;
+  }
+  throw new Error(`Invalid MCP_TRANSPORT: ${transportName}. Expected stdio or http.`);
 }
 
 runServer().catch((error) => {

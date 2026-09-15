@@ -317,6 +317,20 @@ To use this with Claude Desktop, add the following to your `claude_desktop_confi
   }
 }
 ```
+
+### Shared Streamable HTTP server
+
+The default transport remains stdio. To run one loopback HTTP process shared by
+multiple MCP clients, set these variables before starting the same executable:
+
+```bash
+MCP_TRANSPORT=http MCP_HOST=127.0.0.1 MCP_PORT=8001 mcp-server-ticktick
+```
+
+Connect clients to `http://127.0.0.1:8001/mcp`. The HTTP transport deliberately
+accepts loopback bind addresses and loopback `Host` headers only; requests with a
+foreign `Host` are rejected with status 421.
+
 ### Installing via Smithery
 
 To install ticktick-mcp-server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@alexarevalo9/ticktick-mcp-server):
