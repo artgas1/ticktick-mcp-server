@@ -26,7 +26,7 @@
     "ticktick"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.8.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "dotenv": "^16.4.7",
     "node-fetch": "^3.3.2",
     "open": "^10.1.0",
